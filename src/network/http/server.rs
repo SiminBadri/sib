@@ -161,6 +161,25 @@ fn make_socket(
     Ok(sock)
 }
 
+/// Create a CertifiedKey (supports RSA/ECDSA via aws-lc)
+fn make_certified_key(certs: Vec<rustls::pki_types::CertificateDer<'static>>, key: rustls::pki_types::PrivateKeyDer<'static>) -> std::sync::Arc<rustls::sign::CertifiedKey> {
+    // any_supported_type returns Arc<dyn SigningKey>
+    let signing_key: std::sync::Arc<dyn rustls::sign::SigningKey> = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).expect("invalid private key");
+    std::sync::Arc::new(rustls::sign::CertifiedKey::new(certs, signing_key))
+}
+
+/// Resolver that always returns the same certificate regardless of SNI
+#[derive(Debug)]
+struct DefaultCertResolver {
+    cert: std::sync::Arc<rustls::sign::CertifiedKey>,
+}
+
+impl rustls::server::ResolvesServerCert for DefaultCertResolver {
+    fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<std::sync::Arc<rustls::sign::CertifiedKey>> {
+        Some(self.cert.clone())
+    }
+}
+
 #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_rustls_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
@@ -201,16 +220,14 @@ fn make_rustls_config(
         }
     };
 
+    let certified_key = make_certified_key(certs, key);
+
+    let resolver = std::sync::Arc::new(DefaultCertResolver { cert: certified_key });
+
     // TLS config
     let mut cfg = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Server could not load cert/key: {e}"),
-            )
-        })?;
+        .with_cert_resolver(resolver); // returns ServerConfig directly
 
     // set ALPN
     cfg.alpn_protocols = alpn_protocols;
