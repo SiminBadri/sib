@@ -580,6 +580,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             use crate::network::http::h2_server::serve;
                             let service = factory_cloned.async_service(shard_id);
 
+                            let alpn_protocol = tls_stream.get_ref().1.alpn_protocol();
+                            eprintln!("ht2 tls alpn: {}",String::from_utf8_lossy(alpn_protocol.unwrap_or(b"N/A")));
                             if let Err(e) =
                                 serve(tls_stream, service, &h2_cfg_cloned, peer_ip).await
                             {
