@@ -112,12 +112,12 @@ pub(crate) fn read(stream: &mut impl std::io::Read, buf: &mut BytesMut) -> std::
 
     let mut io_slice = [std::io::IoSliceMut::new(read_buf)];
     let n = match stream.read_vectored(&mut io_slice) {
-        Ok(0) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "read closed",
-            ));
-        }
+        // Ok(0) => {
+        //     return Err(std::io::Error::new(
+        //         std::io::ErrorKind::BrokenPipe,
+        //         "read closed",
+        //     ));
+        // }
         Ok(n) => n,
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
         Err(e) => return Err(e),
