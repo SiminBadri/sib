@@ -161,76 +161,59 @@ fn make_socket(
     Ok(sock)
 }
 
-/// Resolver that always returns the same certificate regardless of SNI
-#[derive(Debug)]
-struct DefaultCertResolver {
-    cert: std::sync::Arc<rustls::sign::CertifiedKey>,
-}
-
-impl rustls::server::ResolvesServerCert for DefaultCertResolver {
-    fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<std::sync::Arc<rustls::sign::CertifiedKey>> {
-        Some(self.cert.clone())
-    }
-}
-
 #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_rustls_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     alpn_protocols: Vec<Vec<u8>>,
 ) -> std::io::Result<rustls::ServerConfig> {
-    use rustls::sign::CertifiedKey;
-    use std::sync::Arc;
-
-    // --- Load certificates and key ---
-    use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use std::io::Cursor;
+    use rustls_pemfile::{certs, pkcs8_private_keys};
 
-    // Load certs
+    // Load certs & key
     let certs: Vec<CertificateDer<'static>> = {
-        let mut reader = Cursor::new(chain_cert_key.1);
-        certs(&mut reader).collect::<Result<Vec<_>, _>>()?
+        let mut reader = std::io::Cursor::new(chain_cert_key.1);
+        certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect()
     };
 
-    // Try PKCS#8 first, then RSA (PKCS#1)
     let key: PrivateKeyDer<'static> = {
-        let mut reader = Cursor::new(chain_cert_key.2);
-        let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader).collect();
+        let mut reader = std::io::Cursor::new(chain_cert_key.2);
+        let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
+            .map(|res| {
+                res.map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Server got a bad private key: {e}"),
+                    )
+                })
+            })
+            .collect();
         let keys = keys?;
         if let Some(key) = keys.into_iter().next() {
             PrivateKeyDer::from(key)
         } else {
-            let mut reader = Cursor::new(chain_cert_key.2);
-            let keys: Result<Vec<_>, std::io::Error> = rsa_private_keys(&mut reader).collect();
-            let keys = keys?;
-            if let Some(key) = keys.into_iter().next() {
-                PrivateKeyDer::from(key)
-            } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Server could not find a private key",
-                ));
-            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Server could not find a private key",
+            ));
         }
     };
 
-    // --- Build CertifiedKey ---
-    let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid key"))?;
-    let certified_key = Arc::new(CertifiedKey::new(certs, signing_key));
-
-    let resolver = Arc::new(DefaultCertResolver { cert: certified_key });
-
-    // --- Build ServerConfig ---
+    // TLS config
     let mut cfg = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_cert_resolver(resolver);
+        .with_single_cert(certs, key)
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Server could not load cert/key: {e}"),
+            )
+        })?;
 
-    // Supported ALPN protocols
+    // set ALPN
     cfg.alpn_protocols = alpn_protocols;
-
-    // NOTE: In rustls 0.23.x you **do not** set `min_tls_version` or `max_tls_version`.
-    // The crypto provider (e.g., aws-lc-rs) automatically enables TLS1.2 & TLS1.3.
 
     Ok(cfg)
 }
@@ -580,8 +563,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             use crate::network::http::h2_server::serve;
                             let service = factory_cloned.async_service(shard_id);
 
-                            let alpn_protocol = tls_stream.get_ref().1.alpn_protocol();
-                            eprintln!("ht2 tls alpn: {}",String::from_utf8_lossy(alpn_protocol.unwrap_or(b"N/A")));
                             if let Err(e) =
                                 serve(tls_stream, service, &h2_cfg_cloned, peer_ip).await
                             {
@@ -725,6 +706,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 // Serve H2 on this connection
                                 use crate::network::http::h2_server::serve;
                                 let service = factory.async_service(shard_id);
+
+                                let alpn_protocol = tls_stream.get_ref().1.alpn_protocol();
+                                eprintln!(
+                                    "h2 tls alpn: {}", String::from_utf8_lossy(alpn_protocol.unwrap_or(b"N/A"))
+                                );
 
                                 if let Err(e) =
                                     serve(tls_stream, service, &h2_cfg2, peer_ip).await
